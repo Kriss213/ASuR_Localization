@@ -1,25 +1,29 @@
 __author__ = "Krišs Aleksandrs Vasermans"
 """
-This file contains classes used for Markov's localization study project.
+This file contains classes used for FastSLAM study project.
 
-Classes: Environment, Robot, MarkovLocalization
+Classes: Environment, Robot, Particle, Landmark, FastSLAM
 """
-from typing import List
-import matplotlib
+from copy import deepcopy
+from typing import List, Tuple, Union
 from matplotlib.axes import Axes
-from matplotlib.axes._axes import Axes as Ax
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
+from matplotlib.collections import PatchCollection
+from matplotlib.patches import FancyArrow
 import numpy as np
 import os
 from termcolor import colored
 import matplotlib.pyplot as plt
 from matplotlib.text import Annotation
+from scipy.stats.mstats import winsorize
+
 os.system('color')
 
 OBSTACLE = 1
 FREE_SPACE = 0
-PLT_WAIT = 0.2
+PLT_WAIT = 1e-3
+
 class Environment:
     """
     This class initializes and updates a new environment with given size.
@@ -33,6 +37,13 @@ class Environment:
         '-': 'grey',
         '|': 'grey',
         ' ': 'white',
+    }
+
+    directions = {
+        0: '→',
+        90: '↑',
+        180: '←',
+        270: '↓'
     }
 
     def __init__(self, size:tuple=(10,10), map:str=None, p_obstacle:float=0.25):
@@ -161,32 +172,33 @@ class Environment:
         self.__ax.set_yticklabels([])
         self.__ax.set_xticks([-0.5+i for i in range(self._width)])
         self.__ax.set_yticks([-0.5+i for i in range(self._height)])
-        self.__annotations:List[Annotation] = []# = self.__ax.annotate('',(0,0))
-        plt.show()
+        self.__annotations:List[Annotation] = []
         
-    def display(self, robots: List["Robot"]) -> None:
+        plt.pause(PLT_WAIT)
+        
+    def display(self, robots: List["Robot"]=None) -> None:
         """
         Display environment in matplotlib window.
         
         :param robots: A list of Robot instances to place in environment
         """
-        
         # Plot the environment matrix
-        for ann in self.__annotations:
-            ann.remove()
-        self.__annotations.clear()
-        
-        for robot in robots:
-            self.__annotations.append(
-                self.__ax.annotate(
-                    robot._get_direction_symbol(),
-                    (robot.x, robot.y),
-                    fontsize=36,
-                    color='red',
-                    ha='center', va='center')
-            )
-        
-
+        if robots:
+            for ann in self.__annotations:
+                ann.remove()
+            self.__annotations.clear()
+            
+            for robot in robots:
+                self.__annotations.append(
+                    self.__ax.annotate(
+                        self.directions[robot.theta],
+                        (robot.x, robot.y),
+                        fontsize=36,
+                        color='red',
+                        ha='center', va='center')
+                )
+        self.__fig.canvas.draw()  # Update the plot
+        self.__fig.canvas.flush_events()
         plt.pause(PLT_WAIT)
        
     def save_map(self, file_name:str) -> None:
@@ -197,13 +209,14 @@ class Environment:
         """
         np.savetxt(file_name, self.grid, fmt='%d')
 
-    def _get_perception_from_point(self, x:int, y:int, theta:int) -> dict:
+    def _get_perception_from_point(self, x:int, y:int, theta:int=None, as_coords:bool=False) -> dict:
         """
-        Get distance to closest obstacle on all sides of point.
+        Get distance to or coordinates of closest obstacle on all sides of point.
         
         :param x: X coordinate
         :param y: Y coordinate
         :param theta: Orientation (0, 90, 180, 270)
+        :param as_coords: If true, return coordinates of observed obstacles
         """
         
         def get_dist_in_dir(x_dir, y_dir):
@@ -226,126 +239,73 @@ class Environment:
                 return int(abs(test_x-x))
             else:
                 return int(abs(test_y-y))
-            
+        
+        
         front = rear = left = right = 0
         if theta == 0:
             front = get_dist_in_dir(1, 0)
             rear  = get_dist_in_dir(-1, 0)
             left = get_dist_in_dir(0, -1)
             right = get_dist_in_dir(0, 1)
+            pos = [(x+front, y), (x, y-left), (x-rear, y), (x, y+right)]
         elif theta == 90:
             front = get_dist_in_dir(0, -1)
             rear  = get_dist_in_dir(0, 1)
             left = get_dist_in_dir(-1, 0)
             right = get_dist_in_dir(1, 0)
+            pos = [(x, y-front), (x-left, y), (x, y+rear), (x+right, y)]
         elif theta == 180:
             front = get_dist_in_dir(-1, 0)
             rear  = get_dist_in_dir(1, 0)
             left = get_dist_in_dir(0, 1)
             right = get_dist_in_dir(0, -1)
+            pos = [(x-front, y), (x, y+left), (x+rear, y), (x, y-right)]
         elif theta == 270:
             front = get_dist_in_dir(0, 1)
             rear  = get_dist_in_dir(0, -1)
             left = get_dist_in_dir(1, 0)
             right = get_dist_in_dir(-1, 0)
+                    # front     #left       # rear       # right   
+            pos = [(x, y+front), (x+left, y), (x, y-rear), (x-right, y)]
         else:
             raise Exception(f"Invalid theta value: {theta}")
 
-        obstacle_dists = {
-            "left": left,
-            "right": right,
-            "front": front,
-            "rear": rear,
+        sensor = {
+            "distances": [front, left, rear, right],
+            "angles": [0, 90, 180, 270]
         }
-        return obstacle_dists
+
+        if as_coords:
+            object_pos = {
+                "positions": pos,
+                "angles": [0, 90,180, 270]
+            }
+            return object_pos
+
+        return sensor
     
-    def _get_perception_from_point_old(self, x:int, y:int, theta:int) -> list:
-        """
-        ### Get environment perception from specific point of view and orientation.
-        ### List start from position's rear-left side.
-
-        ## Example:
-        (F - free cell, X - obstacle).\n
-        +---+---+---+\n
-        | X | F | X |\n
-        +---+---+---+\n
-        | X | ↑ | F |\n
-        +---+---+---+\n
-        | F | X | X |\n
-        +---+---+---+\n
-
-        Perception vector starts from top left corner and goes around the robot in clockwise direction.
-        #### Example above would give:
-        ```
-        [0, 1, 1, 0, 1, 0, 1, 1]
-        ```
-
-        :param x: X coordinate.
-        :param y: Y coordinate.
-        :param theta: The direction faced (0: right, 90: up, 180: left, 270: down).
-
-        :return percetption: A binary list. 0 - free space, 1 - obstacle.
-        """
-
-        obstacles_around_point = []
-
-        # check cells around robot
-        def check_cell(x_, y_):
-            if (x_, y_) == (x, y):
-                return
-            
-            if y_ < 0 or y_ >= self._height or x_ < 0 or x_ >= self._width:
-                res = 1
-            elif self._grid[y_, x_] == OBSTACLE:
-                res = 1
-            else:
-                res=0
-            obstacles_around_point.append(res)
-
-        cut = 3
-        for direction in [1, -1]:
-            cut -= 1
-            y_ = y - direction
-            for x_ in range(x-1, x+2)[:cut:direction]:
-                check_cell(x_, y_)
-
-            x_ = x + direction
-            for y_ in range(y-1, y+2)[:cut:direction]:
-                check_cell(x_, y_)
-            cut -= 1
-        
-        # rotate list
-        for _ in range(int(theta / 90.0)):
-            obstacles_around_point = obstacles_around_point[6:] + obstacles_around_point[:6] #rotated_obstacles
-        
-        return obstacles_around_point
-
 class Robot:
     """
     Defines and keeps track of robot. Robot can be in an integer cell with orientation 0, 90, 180 or 270 degrees.
     
-    This robot assumes a perception model where it can see all 8 surrounding cells.
+    This robot has a sensor that can measure distance in 4 directions (theta = 0 at facing direction).
     """
-    def __init__(self, environment:Environment, location:tuple=(0,0,0), sensor_noise:float=0.1, odom_noise:float=0.1):
+    def __init__(self, environment:Environment, sensor_noise:float=0.1, location:tuple=(0,0,0)):
         """
         Initialize a robot.
         
         :param location: Robot's initial location like (x, y, θ).
         :param environment: Environmet for checking, if move is possible.
-        :param sensor_noise: Chance of each cell being percieved incorrectly.
-        :param odom_noise: Chance of robot not realizing it moved.
+        :param sensor_noise: Sensor noise per 1 unit.
         
         """
         x, y, theta = location
         self._x:int = x
         self._y:int = y
         self._theta:int = theta
-        self._previous_x:int = x
-        self._previous_y:int = y
-        self._previous_theta:int = theta
         self.__environment:Environment = environment
-        self.sensor_noise:float = sensor_noise
-        self.odom_noise:float = odom_noise
+        self.__sensor_noise:float = sensor_noise
+
         
         w, h = environment.width, environment.height
         if x >= w or w < 0 or y >= h or y < 0:
@@ -360,15 +320,6 @@ class Robot:
     @property
     def theta(self):
         return self._theta
-    @property
-    def previous_x(self):
-        return self._previous_x
-    @property
-    def previous_y(self):
-        return self._previous_y
-    @property
-    def previous_theta(self):
-        return self._previous_theta
     @x.setter
     def x(self, nv):
         raise Exception(f"Attribute 'x' is read-only!")
@@ -378,71 +329,43 @@ class Robot:
     @theta.setter
     def theta(self, nv):
         raise Exception(f"Attribute 'theta' is read-only!")
-    @previous_x.setter
-    def previous_x(self, nv):
-        raise Exception(f"Attribute 'previous_x' is read-only!")
-    @previous_y.setter
-    def previous_y(self, nv):
-        raise Exception(f"Attribute 'previous_y' is read-only!")
-    @previous_theta.setter
-    def previous_theta(self, nv):
-        raise Exception(f"Attribute 'previous_theta' is read-only!") 
-
+  
     def print_status(self):
         print(f"X: {self.x}, Y: {self.y}, Theta: {self.theta}")
-        print(f"X_prev: {self.previous_x}, Y_prev: {self.previous_y}, Theta_prev: {self.previous_theta}")
-        
-    def _only_rotated(self) -> bool:
-        return self._x == self._previous_x and \
-                self._y == self._previous_y and \
-                self._theta != self._previous_theta
     
-    def _no_movement(self) -> bool:
-        return self._x == self._previous_x and \
-                self._y == self._previous_y and \
-                self._theta == self._previous_theta
-    
-    def turn(self, direction:str, verbose:bool=False) -> bool:
+    def turn(self, direction:str, verbose:bool=False) -> Union[Tuple[float, float, float], None]:
         """
-        Turn the robot to given direction, if possible. The Robot can only turn 90 degrees.
-        
-        :param direction: A string like 'up', 'down', 'left' or 'right'.
+        Turn robot left or right
+
+        :param direction: A string like 'left' or 'right'.
         :param verbose: If True, print information about the turn.
         
         :raises ValueError: If invalid direction parameter given.
         :raises Exception: If environment is not set.
-        
-        :return bool: True, if move was successfull, False otherwise.
+
+        :return diff: Tuple[dx, dy, dtheta]
         """
-        
-        if direction not in ['up', 'down', 'left', 'right']:
+        if direction not in ['left', 'right']:
             raise ValueError(f"Invalid direction provided: {direction}!")
         
-        dir_theta = {
-            'up': 90,
-            'down':270,
-            'left':180,
-            'right':0
-        }
-        target_theta = dir_theta[direction]
         current_theta = self._theta
-        condition = current_theta == (target_theta+90)%360 or current_theta == (target_theta-90)%360
-        if condition:
-            self._previous_theta:int = current_theta
-            self._previous_x:int = self._x
-            self._previous_y:int = self._y
-            self._theta:int = target_theta
+        target_theta = None
+        if direction == 'left':
+            target_theta = (current_theta + 90) % 360
+            diff = 90
+        elif direction == 'right':
+            target_theta = (current_theta - 90) % 360
+            diff = -90
         
+        self._theta:int = target_theta
+
         if verbose:
             line = "========================================="
-            if condition:
-                print(colored(line + f"\n|\tTurned from θ = {current_theta} to θ = {self._theta}\t|\n"+line, 'green'))
-            else:
-                print(colored(line + f"\n|\tCouldn't turn from θ = {current_theta} to θ = {self._theta}\t|\n"+line, 'red'))
-        
-        return condition
+            print(colored(line + f"\n|\tTurned from θ = {current_theta} to θ = {self._theta}\t|\n"+line, 'green'))
+
+        return (0, 0, diff)
    
-    def move(self, verbose:bool=False) -> bool:
+    def move(self, verbose:bool=False) -> Union[Tuple[float, float, float], None]:
         """
         Move the robot in given direction.
         
@@ -450,7 +373,7 @@ class Robot:
 
         :raises ValueError: If theta value is unexpected.
 
-        :return bool: True, if move was successfull, False otherwise. 
+        :return diff: Tuple[dx, dy, dtheta] or None
         """
         
         # NOTE inverted y axis for printing in console
@@ -477,345 +400,363 @@ class Robot:
                 print(colored(line + f"\n|\tMoved from {(self._x, self._y)} to {(new_x, new_y)}\t|\n"+line, 'green'))
             
             
-            self._previous_x, self._previous_y = self._x, self._y
+            prev_x, prev_y, prev_theta = self._x, self._y, self._theta
             self._x, self._y = new_x, new_y
 
-            return True
+            return (self._x - prev_x, self._y - prev_y, 0)
         else:
             if verbose:
                 print(colored(line + f"\n|  Couldn't move from {(self._x, self._y)} to {(new_x, new_y)}  |\n"+line, 'red'))
-            return False
-        
-    def _get_direction_symbol(self) -> str:
+            return None
+           
+    def get_perception(self, ret_coords:bool=False) -> Union[dict, Tuple[dict, dict]]:
         """
-        Get an arrow indicating robots direction.
-        
-        :raises ValueError: If theta value is unexpected.
+        Get robot's perception as:
+        ```
+        {
+            distances: []
+            angles: = [] 
+        }
+        ```
 
-        :return arrow: An arrow symbol.
+        Robot's facing direction is angle 0.
+
+        :param ret_coords: Also return observed obstacle coordinates like:
+        ```
+        {
+            positions: []
+            angles: = [] 
+        }
+        ```
+
+        :return dict | Tuple[dict, dict]: perception or (perception, coordinates)
         """
-        theta = self._theta
-        if theta == 0:
-            return '→'
-        elif theta == 90:
-            return '↑'
-        elif theta == 180:
-            return '←'
-        elif theta == 270:
-            return '↓'
-        else:
-            raise ValueError(f"Unexpected theta value: {theta}!")
-    
-    def get_perception(self) -> dict:
-        """
-        Get robot's perception with sensor and odometry noise.
-        """
-        # handle odometry error
-        if np.random.choice([True, False],1,p=[1-self.odom_noise, self.odom_noise]):
-            perception = self.__environment._get_perception_from_point(self._x, self._y, self._theta)
-        else:
-            perception = self.__environment._get_perception_from_point(self._previous_x, self._previous_y, self._theta)
-            
-        for key, point in perception.items():
-            #cor_x, cor_y = point
-            odds = [self.sensor_noise, 1-self.sensor_noise]
-            if np.random.choice([True, False], 1, p=odds):
-                add_sub = np.random.choice([-1, 1], 1, [0.5, 0.5])
-                perception[key] = point + add_sub        
+
+        def get_noise():
+            return np.random.uniform(-self.__sensor_noise,  self.__sensor_noise)
+
+        perception = self.__environment._get_perception_from_point(self._x, self._y, self._theta)
+
+        # add noise to distance measurements
+        perception["distances"] = [d+get_noise()*d for d in perception["distances"]]
+
+        if ret_coords:
+            coords = self.__environment._get_perception_from_point(self._x, self._y, self._theta, as_coords=True)
+            return perception, coords
         
         return perception
+    
+# FastSLAM classes
+class Landmark:
+    """
+    A landmark that can be observed by a particle
+    """
+    def __init__(self, id, mean:float, covariance:np.ndarray):
+        """
+        Initialize a new landmark.
         
-class MarkovLocalization:
-    """
-    Perform Markov localization for a robot
-    """
-    def __init__(self, robot:Robot, environment:Environment, perception_chance:float=0.9):
+        :param id: a *hashable* (int, tuple, etc.) value for identifying landmarks
+        :param mean: mean vector
+        :param covariance: covariance matrix
+        
         """
-        Initialize Markov localization class.
+        self.id = id
+        self.mean:np.ndarray = mean # a vector with mean value for each dim
+        self.covariance:np.ndarray = covariance
 
-        :param robot_instance: An instance of class Robot.
-        :param perception_chance: Chance of accurate perception.
-        :param move_chance: Chance of odometry being correct.
-
+class Particle:
+    """
+    A single particle in fast slam system.
+    """
+    def __init__(self, x:int, y:int, theta:int, weight:float):
+        self.x:int = x
+        self.y:int = y
+        self.theta:int = theta
+        self.weight:float = weight
+        
+        self.landmarks:List[Landmark] = []
+        
+    def update_landmark(self, observed_landmarks:List[Landmark], measurements:List[float], angles:List[float], observation_noise:float) -> None:
         """
-        self.__robot:Robot = robot
-        self.__environment:Environment = environment
-        self.__perception_chance:float = perception_chance
+        Update particle weight (measurement model)
+        If landmarks are new: initialize new landmark mean value and covariance.
+        If landmark has been observed before - update it using Extended Kalman Filter.
+        
+        :param observed_landmarks: A list of observed landmarks.
+        :param measurements: A list of measurements from which the landmarks were observed.
+        :param angles: A list of Robot angles the landmark was measured at.
+        :param observation noise: observation noise per 1 unit
+        """
+        for i, landmark in enumerate(observed_landmarks):
+            # check if landmark is known
+            #landmark_is_known = any(lm.id == landmark.id for lm in self.landmarks)
+            existing_landmark = next((lm for lm in self.landmarks if lm.id == landmark.id), None)
+            
+            if existing_landmark:               
+                X_p = existing_landmark.mean#expected_pos#existing_landmark.mean
+                P_p = existing_landmark.covariance
+                
+                H = np.eye(2)
 
-        w, h = self.__environment.width, self.__environment.height
-        configuration_count = h * w * 4
+                # observation noise per 1 unit
+                # assume that measurement[i] is for current landmark
+                distance_to_obstacle = measurements[i]
+                Q = np.abs(np.eye(2) * observation_noise * measurements[i])
+                
+                # construct where the landmark should be based on current particle position and measurement
+                robot_angle = angles[i]
+                Z = np.array([
+                    self.x + distance_to_obstacle * np.cos(np.deg2rad(self.theta + robot_angle)),
+                    self.y - distance_to_obstacle * np.sin(np.deg2rad(self.theta + robot_angle)), #minus?
+                ])
+                
+                # innovation. Greater innovation -> greater loss of weight
+                Y = Z - H @ X_p
+                
+                # innovation variance
+                S = H @ P_p @ H.T + Q
+                
+                # Kalman gain
+                K = P_p @ H.T @ np.linalg.inv(S)
+                
+                # update landmark
+                existing_landmark.mean = X_p + K @ Y
+                I = np.eye(2)
+                existing_landmark.covariance = (I - K@H) @ P_p
+                
+                self.weight *= np.linalg.det(2*np.pi*S)**(-1/2) * np.exp(-1/2 * Y @ np.linalg.inv(S) @ Y.T)
 
-        init_prob = 1.0 / configuration_count
+            else:
+                # add new landmark
+                # TODO test without deepcopy
+                self.landmarks.append(deepcopy(landmark))
 
-        # initialize configuration space as a 3D array
-        self.__belief:np.ndarray = np.ones((h, w, 4)) * init_prob
-        self.__indices:list = list(np.ndindex(self.__belief.shape))
+    def update_motion(self, motion:Tuple[float, float, float], motion_noise:float) -> None:
+        """
+        Update the particle's position based on robot's dx, dy, dtheta.
+        
+        :param motion: Motion as (dx, dy, dtheta)
+        :param motion_noise: standard deviation for noise in motion
+        """
+
+        dx, dy, dtheta = motion
+
+        self.x += dx + np.random.normal(0, motion_noise) * dx
+        self.y += dy + np.random.normal(0, motion_noise) * dy
+        self.theta += dtheta + np.random.normal(0, motion_noise) * (dtheta/10)
+        self.theta = self.theta % 360
+
+class FastSLAM:
+    """
+    Handle fast simultaneous localization and mapping.
+    """
+    def __init__(self, env_size:Tuple[int, int], approx_pos:Tuple[float, float, float], particle_count:int = 100):
+        """
+        Initialize a FastSLAM instance.
+        
+        :param particle_count: - Particle count.
+        :param approx_pos: Generate initial particles around this position (x, y, theta).        
+        :param env_size: - Size of the environment like (height, width)
+        """
+
+        # create a 2D array map representation.
+        h, w = env_size
+        self._map:np.ndarray = np.zeros((h, w))
+        
+        #self.__true_environment:Environment = environment
+
+        # initialize new particles
+        self.__init_x, self.__init_y, self.__init_theta = approx_pos
+        offset = 1
+        theta_offset = 30
+        self.particles:List[Particle] = [
+            Particle(
+                np.random.uniform(self.__init_x - offset, self.__init_x + offset),
+                np.random.uniform(self.__init_y - offset, self.__init_y + offset),
+                np.random.uniform(self.__init_theta-theta_offset, self.__init_theta+theta_offset),
+                weight=1.0) for _ in range(particle_count)]
        
-        self.__init_display()
 
-    @property
-    def belief(self):
-        return self.__belief
-    @belief.setter
-    def belief(self, nv):
-        raise Exception(f"Attribute 'belief' is read-only!")
+        self.__init_display()
     
     def __init_display(self):
         plt.ion()
-        
-        fig_axs = plt.subplots(2, 2, figsize=(6, 6))
+        fig_axs = plt.subplots(1, 1, figsize=(5, 5))
         self.__fig:Figure = fig_axs[0]
-        self.__axs:Axes = fig_axs[1]
-        self.__fig.suptitle("Probability distribution")
-        titles = ["θ = 0° (→)", "θ = 90° (↑)", "θ = 180° (←)","θ = 270° (↓)"]
-        self.__ims:List[AxesImage] = []
-        for i, ax in enumerate(self.__axs.flat):
-            ax:Ax = ax # for code suggestions
-            ax.set_title(titles[i])
-            im = ax.imshow(self.__belief[:,:,i], cmap='viridis', vmin=0, vmax=1)
-            self.__ims.append(im)
-            ax.grid(True)
-            ax.set_xticklabels([])
-            ax.set_yticklabels([])
-            ax.set_xticks([-0.5+i for i in range(self.__environment.width)])
-            ax.set_yticks([-0.5+i for i in range(self.__environment.height)])
-            #self.__ann = self.__ax.annotate('',(0,0))
-        self.__fig.colorbar(im, ax=self.__axs.ravel().tolist())
-        plt.show()
+        self.__ax:Axes = fig_axs[1]
+        title = "Fast SLAM environment"
+        self.__ax.set_title(title)
         
-    def display(self):
+        self.__im:AxesImage = self.__ax.imshow(self._map, cmap='Greys', vmin=0, vmax=1.0)
+        self.__ax.grid(True)
+        self.__ax.set_xticklabels([])
+        self.__ax.set_yticklabels([])
         
-        for i, im in enumerate(self.__ims):
-            #ax.imshow(self.__belief[:,:,i], cmap='viridis', vmin=0, vmax=1)#, cmap='Greys')
-            im.set_data(self.__belief[:,:,i])
-            
-       
-        #plt.show()
+        h, w = self._map.shape
+        self.__ax.set_xticks([-0.5+i for i in range(w)])
+        self.__ax.set_yticks([-0.5+i for i in range(h)])
+        
+        self.__arrows:List[FancyArrow] = []
+        self.__particle_plot:PatchCollection = None
+        self.__landmark_plot:List[PatchCollection] = []
+        
         plt.pause(PLT_WAIT)
-            
-    def print(self):
-        """
-        Prints cell probabilities for each cell
-        """
-        
-        header = """
-.---------------------------------------------------------.
-| ____            _           _     _ _ _ _   _           |
-||  _ \ _ __ ___ | |__   __ _| |__ (_) (_) |_(_) ___  ___ |
-|| |_) | '__/ _ \| '_ \ / _` | '_ \| | | | __| |/ _ \/ __||
-||  __/| | | (_) | |_) | (_| | |_) | | | | |_| |  __/\__ \|
-||_|   |_|  \___/|_.__/ \__,_|_.__/|_|_|_|\__|_|\___||___/|
-'---------------------------------------------------------'
-"""
-        print(colored(header, 'red'))
-        for i in range(4):
-            theta_header = "=========================================\n" + \
-                    f"|\t\tθ = {(i)*90}°  \t\t|\n" + \
-                    "========================================="
-            print(colored(theta_header, 'yellow'))
-            conf_space_layer = self.__belief[:,:,i].tolist()
-            max_prob = np.max(self.__belief)
-
-            eps = 1e-4 # if diff is smaller than eps, consider that cell matches max value
-            for row in conf_space_layer:
-                row_len = 0
-                row_str = "| "
-                row_len += len("| ")
-                for i, cell in enumerate(row):                    
-                    row_str += colored(f"{cell:.4f}", 'green' if np.abs(cell-max_prob) < eps else 'white')
-                    row_len += len(f"{cell:.4f}")
-                    if i != len(row)-1:
-                        row_str += " | "
-                        row_len += len(" | ")
-                row_str += " |"
-                row_len += len(" |")
-            
-
-                print("-"*row_len)
-                print(row_str)
-            print("-"*row_len)
-        print(colored("="*row_len, 'red'), '\n')
     
-    def __rotation_odometry_model(self, x:int, y:int, theta:int) -> float:
+    def display(self):
         """
-        Calculate new belief from rotation odometry. This model assumes, that robot
-        could only rotate to given state from states with +-90 deg. with 40% chance each.
-        Add 10% chance for no rotation for noise.
-        
-        :param x: X position.
-        :param y: Y position.
-        :param theta: Robot orientation.
-        
-        :raises ValueError: If invalid theta value.
-        
-        :return new belief: For cell x, y, theta.
+        Display currently mapped map with particles.
         """
-        if theta not in [0, 90, 180, 270]:
-            raise ValueError(f"Invalid theta value: {theta}")
+        for arr in self.__arrows:
+            arr.remove()
+        self.__arrows.clear()
+        if self.__particle_plot:
+            self.__particle_plot.remove()
         
-        # it could rotate to current pos only from theta+-90, both with 45%. 10% it didn't rotate
-        new_belief = 0
-        prev_thetas = [(theta-90+360)%360, theta, (theta+90+360)%360]
-        probs = [0.45, 0.1, 0.45]
-        for prob, prev_theta in zip(probs, prev_thetas):
-            prev_theta_idx = int(prev_theta / 90.0)
-            prev_belief = self.__belief[y, x, prev_theta_idx]
-            new_belief += prob * prev_belief
+        for lm_plot in self.__landmark_plot:
+            lm_plot.remove()
+        self.__landmark_plot.clear()
         
-        return new_belief
-    
-    def __movement_odometry_model(self, x:int, y:int, theta:int) -> float:
-        """
-        Update belief with sensor model:
-        
-        +---+-----+---+                 +---+-----+-----+\n
-        | 0 | 0   | 0 |                 | 0 | 0.0 | 0.05 |\n
-        +---+-----+---+                 +---+-----+-----+\n
-        | 0 | 1.0 | 0 |  (dx, dy) -->   | 0 | 0.1 | 0.85 |\n
-        +---+-----+---+                 +---+-----+-----+\n
-        | 0 | 0   | 0 |                 | 0 | 0.0 | 0.05|\n
-        +---+-----+---+                 +---+-----+-----+\n
-        
-        :param x: X position.
-        :param y: Y position.
-        :param theta: Robot orientation.
-        
-        :raise ValueError: If invalid theta value encountered.
-        
-        :return new belief: For cell x, y, theta
-        """
-        #prev_theta = self.__robot.previous_theta
-        theta_ind = int(theta / 90.0)
-        
-        prob_fw = 0.8
-        prob_stay = 0.1
-        prob_lf = 0.05
-        prob_rf = 0.05
-               
-        # get adjacent cells and calculate new belief.
-        if theta == 0:
-            x_fw, y_fw = x, y
-            x_stay, y_stay = x-1, y
-            x_lf, y_lf = x, y-1
-            x_rf, y_rf = x, y+1
-        elif theta == 90:
-            x_fw, y_fw = x, y
-            x_stay, y_stay = x, y+1
-            x_lf, y_lf = x-1, y
-            x_rf, y_rf = x+1, y
-        elif theta == 180:
-            x_fw, y_fw = x, y
-            x_stay, y_stay = x+1, y
-            x_lf, y_lf = x, y+1
-            x_rf, y_rf = x, y-1
-        elif theta == 270:
-            x_fw, y_fw = x, y
-            x_stay, y_stay = x, y-1
-            x_lf, y_lf = x+1, y
-            x_rf, y_rf = x-1, y
-        else:
-            raise ValueError(f"Invalid theta value: {theta}")
-        
-        # dict matching point and probablity it came from it:
-        # fw is the new point robot came to
-        point_probs = {
-            (x_fw, y_fw): prob_stay, # e.g. probability that robot got to new point by already being there
-            (x_stay, y_stay): prob_fw,
-            (x_lf, y_lf): prob_lf,
-            (x_rf, y_rf): prob_rf
-        }
-        new_belief = 0
-        # sum all possible ways to get to xy from adjacent cells
-        for point, prob in point_probs.items():
-            try:
-                x_, y_ = point
-                # get probability from adjacent cell
-                # where it is possibly coming from
-                prev_belief = self.__belief[y_, x_, theta_ind]
-                
-                # add the chance it came from there
-                new_belief += prev_belief * prob
-            except IndexError:
-                # likely a point is out of bounds
-                continue
-        # set the new belief in new belief array
-        return new_belief
-        
-    def __predict(self) -> None:
-        """
-        Prediction step. Updates belief space based on odometry.
-        """
-        # if no movement was done, return
-        if self.__robot._no_movement():
-            return
+        x = []
+        y = []
 
-        # new belief array
-        new_beliefs = np.zeros_like(self.__belief)
-                
-        for y, x, theta_ind in self.__indices:
-            theta = int(theta_ind * 90)
-            
-            # check if robot's previous pos == current pos
-            # it means it just rotated without moving
-            if self.__robot._only_rotated():
-                
-                # apply odometry model for only rotating
-                new_belief = self.__rotation_odometry_model(x, y, theta)
-                   
-            else:
-                # robot moved
-                new_belief = self.__movement_odometry_model(x, y, theta)
-            
-            
-            new_beliefs[y,x,theta_ind] = new_belief
-            
-        self.__belief = new_beliefs.copy()
-    
-    def __correct(self, print_robot_perception:bool=False) -> None:
-        """
-        Correct belief space based on sensor perception.
+        sizes = []
         
-        :param print_robot_perception: Print robot's perception.
-        
-        """
-        # get robot perception
-        robot_perception = self.__robot.get_perception()
-        
-        if print_robot_perception:
-            x,y,theta = self.__robot.x, self.__robot.y, self.__robot.theta
-            title_str = colored(f"""======================================================
-| Robot's perception at position X: {x}, Y: {y}, θ: {theta} |
-======================================================""",'red')
-            print(title_str)
-            for dir, dist in robot_perception.items():
-                #print(dir, dist)
-                
-                print(f"{dir}:\t{int(dist)}")
-            print(colored('======================================================','red'))
+        for particle in self.particles:
+            x.append(particle.x)
+            y.append(particle.y)
+            
+            # plot arrow
+            dx = np.cos(np.deg2rad(particle.theta))*0.2
+            dy = np.sin(np.deg2rad(particle.theta+180))*0.2
+            arrow = self.__ax.arrow(particle.x, particle.y, dx, dy, head_width=0.1, head_length=0.2, fc='red', ec='red')
+            self.__arrows.append(arrow)
+            sizes.append(20*particle.weight)
 
-        for y, x, theta_ind in self.__indices:
-            theta = int(theta_ind * 90)
-            point_perception = self.__environment._get_perception_from_point(x, y, theta)
+        
+        self.__im.set_data(self._map)
+        self.__particle_plot = self.__ax.scatter(x, y, s=sizes, color='red')
+        
 
-            if robot_perception == point_perception:
-                self.__belief[y,x,theta_ind] *= self.__perception_chance
-            else:
-                self.__belief[y,x,theta_ind] *= (1-self.__perception_chance)        
-        
-    def update(self,print_robot_perception:bool=False) -> None:
+        self.__fig.canvas.draw()  # Update the plot
+        self.__fig.canvas.flush_events()
+        plt.pause(PLT_WAIT)
+
+    def update_movement(self, diff:Tuple[float, float, float], motion_noise:float=0.2):
         """
-        Update belief space probabilities.
+        Update particle positions from robot movement.
         
-        :param print_robot_perception: Print robot's perception.
-        
+        :param diff: Robot's displacement.
+        :param motion_noise: Motion noise per one unit.
+        """
+        for particle in self.particles:
+            particle.update_motion(motion=diff, motion_noise=motion_noise)
+
+    def update_landmarks(self, measurements:Tuple[dict,dict], measurement_noise:float=0.1):
+        """
+        Update particle weights based on observations.
+
+        :param measurement: Robot's measurements. A tuple like:
+        ```
+        (
+            {
+                distances: []
+                angles: = [] 
+            },
+            {
+                positions: []
+                angles: = []
+            }
+        )
+        ```
+        :param measurement_noise: measurement noise per unit.
+
         """
 
-        self.__predict()
+        # For each particle construct a list of landmarks from measurements
+        for p in self.particles:
+            observed_landmarks:List[Landmark] = []
+            distances:List[float] = []
+            angles:List[float] = []
+
+            for angle, distance, true_pos in zip(measurements[0]["angles"], measurements[0]["distances"], measurements[1]["positions"] ):
+                # angle 0 is robot's facing direction.
+                # true_pos is the correct (x, y) position of obstacle - used as unambiguous identificator.
+                # each iteration of this loop = 1 landmark
+                x = p.x + distance * np.cos(np.deg2rad(p.theta + angle))
+                y = p.y - distance * np.sin(np.deg2rad(p.theta + angle)) # minus?
+                
+                variance = np.abs(np.eye(2) * measurement_noise * distance)
+                landmark = Landmark(
+                    id = true_pos,
+                    mean = np.array([x, y]),
+                    covariance=variance
+                )
+                
+                observed_landmarks.append(landmark)
+                distances.append(distance)
+                angles.append(angle)
+            
+            # Update landmarks for particle
+            p.update_landmark(
+                observed_landmarks=observed_landmarks,
+                measurements=distances,
+                angles=angles,
+                observation_noise=measurement_noise
+            )   
+
+    def resample_particles(self, normalize:bool=True):
+        """
+        Resample particles according to their weights using Stohastic Universal Resampling.
+
+        :param normalize: Normalize particle weights to 0..1
+        """
+        particles = self.particles
+        weights = np.array([p.weight for p in particles])
+        
+        # amount of particles to keep -> stays the same
+        N = len(particles)
+        
+        # Normalize weights
+        weights /= np.sum(weights)
+
+        cumulative_sum = np.cumsum(weights)
+
+        # generate pointers
+        step = 1.0 / N
+        start = np.random.uniform(0, step)
+        pointers = start + step * np.arange(N)
+
+        # resample particles
+        resampled_particles:List[Particle] = []
+        index = 0
+        for p in pointers:
+            while p > cumulative_sum[index]:
+                index += 1
+            resampled_particles.append(deepcopy(particles[index]))
+
         # normalize
-        self.__belief /= (np.sum(self.__belief) + 1e-16)
+        if normalize:
+            rp_sum = np.sum([pr.weight for pr in resampled_particles])
+            for particle in resampled_particles:
+                particle.weight /= rp_sum + 1e-16
         
-        self.__correct(print_robot_perception)
-        
-        # normalize
-        self.__belief /= (np.sum(self.__belief) + 1e-16)
-        
+        self.particles = resampled_particles
+
+        # update slam map
+        self.update_map()
+
+    def update_map(self):
+        new_map = np.zeros_like(self._map)
+        for particle in self.particles:
+            for landmark in particle.landmarks:
+                lm_x, lm_y = landmark.mean
+                id_x, id_y = int(np.round(lm_x)), int(np.round(lm_y))
+                h, w = new_map.shape
+                
+                if id_x < w and id_x >=0 and id_y < h and id_y >=0:
+                    new_map[id_y, id_x] += particle.weight
+
+        self._map += new_map
+        # winsorize to avoid max outliers
+        self._map = winsorize(self._map, limits=[0.0, 0.02])
+        self._map /= np.max(self._map) + 1e-16

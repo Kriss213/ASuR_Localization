@@ -1,4 +1,4 @@
-# Markov Localization
+# FastSLAM
 
 ## Setup
 Setup dependencies:
@@ -13,5 +13,6 @@ python main.py
 
 Parameters can be changed in ```main.py```
 
-## Demo
+## Demo using 15 particles
+
 ![](assets/demo.gif)
