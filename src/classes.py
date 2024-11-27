@@ -476,39 +476,30 @@ class Particle:
         
         self.landmarks:List[Landmark] = []
         
-    def update_landmark(self, observed_landmarks:List[Landmark], measurements:List[float], angles:List[float], observation_noise:float) -> None:
+    def update_landmark(self, observed_landmarks:List[Landmark]) -> None:
         """
         Update particle weight (measurement model)
         If landmarks are new: initialize new landmark mean value and covariance.
         If landmark has been observed before - update it using Extended Kalman Filter.
         
         :param observed_landmarks: A list of observed landmarks.
-        :param measurements: A list of measurements from which the landmarks were observed.
-        :param angles: A list of Robot angles the landmark was measured at.
-        :param observation noise: observation noise per 1 unit
         """
-        for i, landmark in enumerate(observed_landmarks):
+        for landmark in observed_landmarks:
             # check if landmark is known
             #landmark_is_known = any(lm.id == landmark.id for lm in self.landmarks)
             existing_landmark = next((lm for lm in self.landmarks if lm.id == landmark.id), None)
             
             if existing_landmark:               
-                X_p = existing_landmark.mean#expected_pos#existing_landmark.mean
+                X_p = existing_landmark.mean
                 P_p = existing_landmark.covariance
                 
                 H = np.eye(2)
 
-                # observation noise per 1 unit
-                # assume that measurement[i] is for current landmark
-                distance_to_obstacle = measurements[i]
-                Q = np.abs(np.eye(2) * observation_noise * measurements[i])
+                # observation noise
+                Q = landmark.covariance
                 
-                # construct where the landmark should be based on current particle position and measurement
-                robot_angle = angles[i]
-                Z = np.array([
-                    self.x + distance_to_obstacle * np.cos(np.deg2rad(self.theta + robot_angle)),
-                    self.y - distance_to_obstacle * np.sin(np.deg2rad(self.theta + robot_angle)), #minus?
-                ])
+                # where the landmark should be based on current particle position and measurement
+                Z = landmark.mean
                 
                 # innovation. Greater innovation -> greater loss of weight
                 Y = Z - H @ X_p
@@ -528,7 +519,6 @@ class Particle:
 
             else:
                 # add new landmark
-                # TODO test without deepcopy
                 self.landmarks.append(deepcopy(landmark))
 
     def update_motion(self, motion:Tuple[float, float, float], motion_noise:float) -> None:
@@ -683,7 +673,7 @@ class FastSLAM:
                 # true_pos is the correct (x, y) position of obstacle - used as unambiguous identificator.
                 # each iteration of this loop = 1 landmark
                 x = p.x + distance * np.cos(np.deg2rad(p.theta + angle))
-                y = p.y - distance * np.sin(np.deg2rad(p.theta + angle)) # minus?
+                y = p.y - distance * np.sin(np.deg2rad(p.theta + angle))
                 
                 variance = np.abs(np.eye(2) * measurement_noise * distance)
                 landmark = Landmark(
@@ -697,12 +687,7 @@ class FastSLAM:
                 angles.append(angle)
             
             # Update landmarks for particle
-            p.update_landmark(
-                observed_landmarks=observed_landmarks,
-                measurements=distances,
-                angles=angles,
-                observation_noise=measurement_noise
-            )   
+            p.update_landmark(observed_landmarks=observed_landmarks)
 
     def resample_particles(self, normalize:bool=True):
         """

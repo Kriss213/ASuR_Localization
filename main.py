@@ -27,7 +27,7 @@ def main():
     
     # initial update from observaitons
     slam.update_landmarks(robot.get_perception(ret_coords=True))
-    slam.resample_particles(normalize=True)
+    slam.resample_particles(normalize=False)
     slam.display()
     while True:
         try:
