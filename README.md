@@ -1,4 +1,4 @@
-# FastSLAM
+# Merging maps with Hough transform
 
 ## Setup
 Setup dependencies:
@@ -6,13 +6,4 @@ Setup dependencies:
 pip install -r requirements.txt
 ```
 
-### Run by executing 
-```
-python main.py
-```
-
-Parameters can be changed in ```main.py```
-
-## Demo using 15 particles
-
-![](assets/demo.gif)
+### See Python notebook ```main.ipynb```

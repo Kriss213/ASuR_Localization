@@ -1,5 +1,2 @@
-keyboard
 numpy
 matplotlib
-termcolor
-scipy
